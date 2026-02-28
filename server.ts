@@ -17,6 +17,7 @@ import { runInboxSync } from "./src/agents/inbox.ts";
 import { runSentinelLegal } from "./src/agents/sentinel-legal.ts";
 import bcrypt from "bcrypt";
 import { authMiddleware, adminOnly, ROLES } from "./src/auth.ts";
+import { processSendQueue } from "./src/services/send-processor.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -140,6 +141,23 @@ function initDb() {
       briefing_progress INTEGER DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS send_queue (
+      id TEXT PRIMARY KEY,
+      type TEXT CHECK (type IN ('email_reply', 'match_intro', 'scribe_delivery')),
+      source_id TEXT NOT NULL,
+      to_email TEXT NOT NULL,
+      to_name TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      status TEXT DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed')),
+      diplomat_id TEXT,
+      approved_at DATETIME NOT NULL,
+      sent_at DATETIME,
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(diplomat_id) REFERENCES diplomats(id)
+    );
+
     CREATE TABLE IF NOT EXISTS inbox_items (
       id TEXT PRIMARY KEY,
       from_name TEXT NOT NULL,
@@ -169,13 +187,11 @@ function initDb() {
   `);
 
   // Migration for legal_reviewed
-  try {
-    db.exec(`ALTER TABLE intelligence_items ADD COLUMN legal_reviewed BOOLEAN DEFAULT 0`);
-  } catch (err: any) {
-    if (!err.message.includes("duplicate column name")) {
-      console.warn("Could not add legal_reviewed column:", err.message);
-    }
-  }
+  try { db.exec(`ALTER TABLE intelligence_items ADD COLUMN legal_reviewed BOOLEAN DEFAULT 0`); } catch (err: any) { }
+
+  // Migration for outbound
+  try { db.exec(`ALTER TABLE inbox_items ADD COLUMN from_email TEXT`); } catch (err: any) { }
+  try { db.exec(`ALTER TABLE entities ADD COLUMN contact_email TEXT`); } catch (err: any) { }
 
   // Migration for diplomats auth
   try {
@@ -257,6 +273,23 @@ async function startServer() {
   app.post("/api/inbox/:id/approve", adminOnly, (req, res) => {
     const { id } = req.params;
     db.prepare("UPDATE inbox_items SET status = 'approved', read = 1 WHERE id = ?").run(id);
+
+    const inboxItem = db.prepare("SELECT * FROM inbox_items WHERE id = ?").get(id) as any;
+    if (inboxItem && inboxItem.from_email) {
+      db.prepare(`
+        INSERT INTO send_queue (id, type, source_id, to_email, to_name, subject, body, status, diplomat_id, approved_at)
+        VALUES (?, 'email_reply', ?, ?, ?, ?, ?, 'queued', ?, CURRENT_TIMESTAMP)
+      `).run(
+        uuidv4(),
+        inboxItem.id,
+        inboxItem.from_email,
+        inboxItem.from_name,
+        `Re: ${inboxItem.subject}`,
+        inboxItem.draft_body || "",
+        req.diplomat?.sub || null
+      );
+    }
+
     res.json({ success: true });
   });
 
@@ -331,6 +364,35 @@ async function startServer() {
   app.post("/api/matches/:id/approve", adminOnly, (req, res) => {
     const { id } = req.params;
     db.prepare("UPDATE matches SET status = 'actioned' WHERE id = ?").run(id);
+
+    const match = db.prepare(`
+      SELECT m.*, e1.name as home_company, e2.name as local_partner,
+             e2.contact_email as local_contact_email, e1.objectives as home_objectives
+      FROM matches m
+      JOIN entities e1 ON m.home_entity_id = e1.id
+      JOIN entities e2 ON m.local_entity_id = e2.id
+      WHERE m.id = ?
+    `).get(id) as any;
+
+    if (match && match.local_contact_email) {
+      let payload;
+      try { payload = match.payload ? JSON.parse(match.payload) : {}; } catch { payload = {}; }
+      let body = payload?.intro_note || `Introduction rationale: ${match.rationale}\n\nObjectives: ${match.home_objectives}`;
+
+      db.prepare(`
+        INSERT INTO send_queue (id, type, source_id, to_email, to_name, subject, body, status, diplomat_id, approved_at)
+        VALUES (?, 'match_intro', ?, ?, ?, ?, ?, 'queued', ?, CURRENT_TIMESTAMP)
+      `).run(
+        uuidv4(),
+        match.id,
+        match.local_contact_email,
+        match.local_partner,
+        `Introduction: ${match.home_company} — ${match.local_partner}`,
+        body,
+        req.diplomat?.sub || null
+      );
+    }
+
     res.json({ success: true });
   });
 
@@ -349,6 +411,52 @@ async function startServer() {
   app.get("/api/tasks", (req, res) => {
     const tasks = db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all();
     res.json(tasks);
+  });
+
+  app.post("/api/tasks/:id/approve", adminOnly, (req, res) => {
+    const { id } = req.params;
+    const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as any;
+    if (!task) return res.status(404).json({ error: "Task not found" });
+
+    let payload: any = {};
+    if (task.payload) {
+      try { payload = JSON.parse(task.payload); } catch { }
+    }
+
+    // Example only queue if email is provided, else just success
+    if (payload.recipient_email) {
+      db.prepare(`
+        INSERT INTO send_queue (id, type, source_id, to_email, to_name, subject, body, status, diplomat_id, approved_at)
+        VALUES (?, 'scribe_delivery', ?, ?, ?, ?, ?, 'queued', ?, CURRENT_TIMESTAMP)
+      `).run(
+        uuidv4(),
+        task.id,
+        payload.recipient_email,
+        payload.audience || task.audience || "Recipient",
+        task.title,
+        payload.draft || "",
+        req.diplomat?.sub || null
+      );
+    }
+    res.json({ success: true });
+  });
+
+  app.get("/api/send-queue", adminOnly, (req, res) => {
+    const { status } = req.query;
+    let query = "SELECT * FROM send_queue";
+    const params: any[] = [];
+    if (status) {
+      query += " WHERE status = ?";
+      params.push(status);
+    }
+    query += " ORDER BY created_at DESC";
+    const queue = db.prepare(query).all(...params);
+    res.json(queue);
+  });
+
+  app.get("/api/agents/send-queue/run", adminOnly, async (req, res) => {
+    await processSendQueue(db);
+    res.json({ status: "Send queue processed" });
   });
 
   async function runScribeJob(taskId: string, instruction: string, payload: any) {
@@ -666,6 +774,18 @@ async function startServer() {
       }, 8000);
     } catch (error) {
       console.error("[Inbox] Failed to schedule:", error);
+    }
+
+    // Start Send Queue Processor
+    const sendQueueInterval = process.env.SEND_QUEUE_CRON_INTERVAL || "*/5 * * * *"; // Every 5 minutes
+    console.log(`[SendProcessor] Scheduling with interval: ${sendQueueInterval}`);
+
+    try {
+      cron.schedule(sendQueueInterval, () => {
+        processSendQueue(db).catch(err => console.error("[SendProcessor] Scheduled run failed:", err));
+      });
+    } catch (error) {
+      console.error("[SendProcessor] Failed to schedule:", error);
     }
   });
 }

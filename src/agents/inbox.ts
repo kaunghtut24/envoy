@@ -45,7 +45,7 @@ function getHeader(headers: any[], name: string): string {
 /**
  * Helper to split "Sender Name <sender@example.com>" into name and org/email.
  */
-function parseSender(fromHeader: string): { name: string, org: string } {
+function parseSender(fromHeader: string): { name: string, org: string, email: string } {
     const match = fromHeader.match(/^(.*?)\s*<(.*?)>$/);
     if (match) {
         // Basic extraction - could be refined to pull domain as org.
@@ -53,9 +53,9 @@ function parseSender(fromHeader: string): { name: string, org: string } {
         const name = match[1].replace(/"/g, "").trim();
         const email = match[2].trim();
         const domain = email.split("@")[1] || email;
-        return { name: name || email, org: domain };
+        return { name: name || email, org: domain, email };
     }
-    return { name: fromHeader, org: "Unknown" };
+    return { name: fromHeader, org: "Unknown", email: fromHeader };
 }
 
 export async function runInboxSync(
@@ -118,7 +118,7 @@ export async function runInboxSync(
 
             const subject = getHeader(headers, "Subject") || "No Subject";
             const fromHeader = getHeader(headers, "From") || "Unknown Sender";
-            const { name: fromName, org: fromOrg } = parseSender(fromHeader);
+            const { name: fromName, org: fromOrg, email: fromEmail } = parseSender(fromHeader);
 
             const bodyFull = getMessageBody(messageData.payload);
             const bodyPreview = bodyFull.substring(0, 500);
@@ -168,11 +168,12 @@ Set draft_instruction to a one-sentence instruction for The Scribe if requires_d
             const inboxId = uuidv4();
 
             db.prepare(`
-        INSERT INTO inbox_items (id, from_name, from_org, subject, urgency, category, body, status, payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        INSERT INTO inbox_items (id, from_name, from_email, from_org, subject, urgency, category, body, status, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
       `).run(
                 inboxId,
                 fromName,
+                fromEmail,
                 fromOrg,
                 subject,
                 classification.urgency || 'medium',

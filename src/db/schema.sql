@@ -26,6 +26,7 @@ CREATE TABLE entities (
     hs_codes TEXT[], -- Array of HS codes
     size TEXT,
     objectives TEXT,
+    contact_email TEXT,
     relationship_status TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -116,6 +117,7 @@ CREATE TABLE delegation_events (
 CREATE TABLE inbox_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     from_name TEXT NOT NULL,
+    from_email TEXT,
     from_org TEXT NOT NULL,
     subject TEXT NOT NULL,
     urgency priority_level DEFAULT 'medium',
@@ -142,3 +144,20 @@ FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_modification();
 CREATE TRIGGER audit_log_no_delete
 BEFORE DELETE ON audit_log
 FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_modification();
+
+CREATE TABLE send_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type TEXT CHECK (type IN ('email_reply', 'match_intro', 'scribe_delivery')),
+  source_id UUID NOT NULL,
+  to_email TEXT NOT NULL,
+  to_name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT DEFAULT 'queued'
+    CHECK (status IN ('queued', 'sent', 'failed')),
+  diplomat_id UUID REFERENCES diplomats(id),
+  approved_at TIMESTAMPTZ NOT NULL,
+  sent_at TIMESTAMPTZ,
+  error TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);

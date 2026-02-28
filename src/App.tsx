@@ -152,9 +152,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('consul');
   const [command, setCommand] = useState('');
   const [approvals, setApprovals] = useState<Record<string, boolean>>({});
-  const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'consul'; text: string }[]>([
-    { role: 'consul', text: 'CONSUL ONLINE — Monday, 07:15 local time. 6 agents operational. 2 priority items require attention.' }
-  ]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // State for fetched data
@@ -188,6 +185,25 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
+
+  const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'consul' | 'system'; text: string; requiresApproval?: boolean; actionTaken?: string | null }[]>([
+    { role: 'system', text: 'CONSUL ONLINE — connecting to agent fleet...' }
+  ]);
+  const [consulLoading, setConsulLoading] = useState(false);
+
+  useEffect(() => {
+    if (!token) return;
+    apiFetch("/api/agents/status")
+      .then(r => r.json())
+      .then(data => {
+        const active = data.filter((a: any) => a.status === "active").length ?? 0;
+        setChatHistory([{
+          role: "system",
+          text: `CONSUL ONLINE — ${new Date().toLocaleTimeString()}. ${active} agents operational.`
+        }]);
+      })
+      .catch(console.error);
+  }, [token]);
 
   // Custom fetch wrapper to inject token and handle 401s
   const apiFetch = async (url: string, options: RequestInit = {}) => {
@@ -283,16 +299,14 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  const handleCommand = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCommand = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!command.trim()) return;
 
     const userMsg = command.trim();
-    setChatHistory(prev => [...prev, { role: 'user', text: userMsg }]);
     setCommand('');
-
-    // Show a thinking indicator
-    setChatHistory(prev => [...prev, { role: 'consul', text: 'Processing command...' }]);
+    setChatHistory(prev => [...prev, { role: 'user', text: userMsg }]);
+    setConsulLoading(true);
 
     try {
       const res = await apiFetch('/api/consul/route', {
@@ -300,33 +314,33 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: userMsg })
       });
-      const data = await res.json();
 
-      // Replace the "processing" message with the real one
-      setChatHistory(prev => {
-        const newHistory = [...prev];
-        newHistory[newHistory.length - 1] = { role: 'consul', text: data.response };
-        return newHistory;
-      });
+      const json = await res.json();
+      const reply = json.response ?? json.data?.message ?? json.message ?? "Command received.";
 
-      // Auto-refresh data in case an agent was triggered behind the scenes
+      setChatHistory(prev => [...prev, {
+        role: 'consul',
+        text: reply,
+        requiresApproval: json.data?.requires_approval ?? json.requires_approval ?? false,
+        actionTaken: json.data?.action_taken ?? json.action_taken ?? null,
+      }]);
+
       setTimeout(fetchData, 1500);
 
     } catch (error) {
       console.error("Error routing command:", error);
-      setChatHistory(prev => {
-        const newHistory = [...prev];
-        newHistory[newHistory.length - 1] = { role: 'consul', text: "Error connecting to AI Orchestrator." };
-        return newHistory;
-      });
+      setChatHistory(prev => [...prev, { role: 'consul', text: "Connection error — please retry." }]);
+    } finally {
+      setConsulLoading(false);
     }
   };
 
-  const toggleApproval = async (type: 'inbox' | 'match' | 'brief', id: string) => {
+  const toggleApproval = async (type: 'inbox' | 'match' | 'brief' | 'task', id: string) => {
     try {
       let endpoint = '';
       if (type === 'inbox') endpoint = `/api/inbox/${id}/approve`;
       if (type === 'match') endpoint = `/api/matches/${id}/approve`;
+      if (type === 'task') endpoint = `/api/tasks/${id}/approve`;
 
       if (endpoint) {
         await apiFetch(endpoint, { method: 'POST' });
@@ -466,13 +480,37 @@ export default function App() {
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[85%] p-3 rounded-md text-xs leading-relaxed ${msg.role === 'user'
                     ? 'bg-gold/10 border border-gold/30 text-gold'
-                    : 'bg-surface-elevated border border-border-subtle text-text-primary'
+                    : msg.role === 'system'
+                      ? 'bg-transparent text-text-muted font-mono tracking-widest uppercase text-[9px] w-full text-center border-none'
+                      : 'bg-surface-elevated border border-border-subtle text-text-primary'
                     }`}>
                     {msg.role === 'consul' && <span className="block font-mono text-[8px] tracking-widest text-gold mb-1 uppercase">Consul</span>}
                     {msg.text}
+                    {msg.actionTaken && (
+                      <div className="mt-2 text-gold font-mono text-[9px] tracking-widest uppercase bg-gold/5 p-1.5 rounded-sm border border-gold/20">
+                        Action: {msg.actionTaken}
+                      </div>
+                    )}
+                    {msg.requiresApproval && (
+                      <div className="mt-2 text-orange-400 font-mono text-[9px] tracking-widest uppercase">
+                        ⚠ Requires Diplomat Approval
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
+
+              {consulLoading && (
+                <div style={{ display: "flex", gap: 4, padding: "6px 0" }}>
+                  {[0, 1, 2].map(i => (
+                    <div key={i} style={{
+                      width: 5, height: 5, borderRadius: "50%", background: "var(--gold)",
+                      animation: `ep 1.2s ease-in-out ${i * 0.2}s infinite`
+                    }} />
+                  ))}
+                </div>
+              )}
+
               <div ref={chatEndRef} />
             </div>
             <form onSubmit={handleCommand} className="p-4 border-t border-border-subtle flex gap-2">
@@ -492,8 +530,8 @@ export default function App() {
             {['SEZ analysis brief', 'AgriTech matches', 'Delegation status'].map(chip => (
               <button
                 key={chip}
-                onClick={() => setCommand(chip)}
-                className="text-[9px] font-mono tracking-widest text-text-muted border border-border-subtle px-2 py-1 rounded-sm hover:border-gold hover:text-gold transition-colors"
+                onClick={() => { setCommand(chip); setTimeout(() => handleCommand(), 0); }}
+                className="text-[9px] font-mono tracking-widest text-text-muted border border-border-subtle px-2 py-1 rounded-sm hover:border-gold hover:text-gold transition-colors cursor-pointer"
               >
                 {chip}
               </button>
@@ -842,9 +880,21 @@ export default function App() {
                 </div>
                 <p className="text-text-muted text-xs">Audience: {(task as any).payload?.audience || task.audience} · Due {task.due || (task as any).due_at}</p>
               </div>
-              <button className="bg-gold text-bg px-4 py-1.5 rounded-sm font-mono text-[10px] tracking-widest hover:opacity-90">
-                {task.status === 'delivered' ? 'Review Draft' : 'Preview'}
-              </button>
+              <div className="flex gap-2">
+                <button className="bg-surface-elevated text-text-primary py-1.5 px-3 border border-border-subtle hover:border-gold/30 rounded-sm font-mono text-[10px] tracking-widest hover:text-gold transition-colors">
+                  {task.status === 'delivered' ? 'Review Draft' : 'Preview'}
+                </button>
+                {task.status === 'delivered' && (
+                  <button
+                    onClick={() => toggleApproval('task', task.id)}
+                    className={`py-1.5 px-3 rounded-sm font-mono text-[10px] tracking-widest transition-colors border ${approvals[task.id]
+                      ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                      : 'bg-gold text-bg border-gold hover:opacity-90'}`}
+                  >
+                    {approvals[task.id] ? '✓ QUEUED FOR SEND' : 'Approve & Send'}
+                  </button>
+                )}
+              </div>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between items-center text-[9px] font-mono text-text-muted tracking-widest">

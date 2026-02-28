@@ -179,7 +179,7 @@ id UUID PK | name TEXT | mission TEXT | role TEXT | preferences JSONB | created_
 ```
 id UUID PK | type TEXT (home/local) | name TEXT | sector TEXT
 | hs_codes TEXT[] | size TEXT | objectives TEXT
-| relationship_status TEXT | created_at
+| contact_email TEXT | relationship_status TEXT | created_at
 ```
 
 **`matches`** — immutable, append-only scoring records **[PROTECTED]**
@@ -217,10 +217,17 @@ id UUID PK | agent agent_name | action_type TEXT | payload JSONB
 
 **`inbox_items`**
 ```
-id UUID PK | from_name TEXT | from_org TEXT | subject TEXT
+id UUID PK | from_name TEXT | from_email TEXT | from_org TEXT | subject TEXT
 | urgency urgency_level | category item_category
 | body TEXT | draft_body TEXT | status TEXT (pending/approved/declined)
 | read BOOL DEFAULT false | received_at TIMESTAMPTZ
+```
+
+**`send_queue`** — execution layer for approved items
+```
+id UUID PK | type TEXT | source_id UUID | to_email TEXT | to_name TEXT
+| subject TEXT | body TEXT | status TEXT (queued/sent/failed) 
+| diplomat_id UUID FK | approved_at TIMESTAMPTZ | sent_at TIMESTAMPTZ | error TEXT
 ```
 
 **`delegation_events`**
@@ -530,7 +537,8 @@ When adding new features, match these existing patterns exactly:
 5. Frontend Connector tab shows scored cards ordered by score desc
 6. Diplomat reviews score + rationale → clicks "Approve Intro"
 7. POST /api/matches/:id/approve → sets approved_at, status: "actioned"
-8. Logged to audit_log — intro queued for send (actual send not yet implemented)
+8. Logged to audit_log — intro queued to send_queue with approved_at
+9. Send processor cron detects queued item, executes SMTP dispatch, and updates status to sent
 ```
 
 ### 9.4 Priority Inbox Triage & Drafting **[PROTECTED]**
@@ -633,6 +641,9 @@ When adding new features, match these existing patterns exactly:
 │   │   ├── schema.sql        ✅ Full schema with enums, triggers, indexes
 │   │   ├── seed.ts           ✅ Initial mission dataset
 │   │   └── migrations/       ✅ Alter table scripts
+│   ├── services/
+│   │   ├── mailer.ts         ✅ Gmail SMTP abstraction
+│   │   └── send-processor.ts ✅ Outbound cron queue processor
 │   ├── routes/               ✅ All API route handlers
 │   ├── App.tsx               ✅ React root, tab routing
 │   ├── components/           ✅ Shared UI components
@@ -653,15 +664,16 @@ When adding new features, match these existing patterns exactly:
 | 1 | React prototype, all 5 modules, mock data, design system | ✅ Complete |
 | 2 | PostgreSQL schema, Fastify API, seed data, Docker, audit trail | ✅ Complete |
 | 3 | Agent LLM integration: Sentinel, Scribe, Connector, Attaché, Consul | ✅ Complete |
-| 4 | Auth + RBAC, sovereign/on-premise deployment config, self-hosted LLM option, M365 integration | ⬜ Planned |
+| 4 | Auth + RBAC, sovereign/on-premise deployment config, self-hosted LLM option, M365 integration, Outbound Send Layer | 🟡 IN PROGRESS |
 | 5 | Events Engine full lifecycle, voice memo ingestion, mobile-optimised build, automated nurture sequences | ⬜ Planned |
 
 **Immediate next steps (Phase 4):**
-1. Implement Firebase/RBAC robust authentication flow
-2. Sovereign M365 deployment configuration
-3. Self-hosted LLM endpoints configuration
+1. Implement Firebase/RBAC robust authentication flow (Complete)
+2. Outbound Send Layer: Queue processing and Gmail abstraction (Complete - Step 2)
+3. Sovereign M365 deployment configuration
+4. Self-hosted LLM endpoints configuration
 
 ---
 
-*ENVOY-PROJECT-SPEC.md · Version 1.4 · Updated after Phase 3 Step 7 (Sentinel-Legal live)*
+*ENVOY-PROJECT-SPEC.md · Version 1.5 · Updated after Phase 4 Step 2 (Outbound Send Layer live)*
 *All coding agents: append version note and date when making spec updates.*
