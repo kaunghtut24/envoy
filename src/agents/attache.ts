@@ -1,6 +1,7 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
 import type { Database } from "better-sqlite3";
+import type { LLMClient } from "../services/llm.ts";
 
 const ATTACHE_SYSTEM_PROMPT = `You are The Attaché, a logistics and delegation manager for the Myanmar Consulate in Kolkata, India.
 You are given a current delegation itinerary and a list of incoming intelligence items or constraints.
@@ -23,7 +24,7 @@ Return a JSON object matching this structure exactly:
 }
 Return only valid JSON. No markdown.`;
 
-export async function runAttache(db: Database, genAI: GoogleGenAI) {
+export async function runAttache(db: Database, llmClient: LLMClient) {
     console.log("[Attaché] Starting delegation review...");
 
     try {
@@ -49,36 +50,33 @@ export async function runAttache(db: Database, genAI: GoogleGenAI) {
 
         // 3. Ask Gemini to evaluate the schedule against the intelligence
         try {
-            const result = await genAI.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                config: {
-                    systemInstruction: ATTACHE_SYSTEM_PROMPT,
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            updated_schedule: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        time: { type: Type.STRING },
-                                        event: { type: Type.STRING },
-                                        agent: { type: Type.STRING },
-                                        status: { type: Type.STRING },
-                                        alert_reason: { type: Type.STRING, nullable: true }
-                                    },
-                                    required: ["time", "event", "agent", "status"]
-                                }
+            const resultText = await llmClient.generate(
+                ATTACHE_SYSTEM_PROMPT,
+                prompt,
+                "application/json",
+                {
+                    type: Type.OBJECT,
+                    properties: {
+                        updated_schedule: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    time: { type: Type.STRING },
+                                    event: { type: Type.STRING },
+                                    agent: { type: Type.STRING },
+                                    status: { type: Type.STRING },
+                                    alert_reason: { type: Type.STRING, nullable: true }
+                                },
+                                required: ["time", "event", "agent", "status"]
                             }
-                        },
-                        required: ["updated_schedule"]
-                    }
+                        }
+                    },
+                    required: ["updated_schedule"]
                 }
-            });
+            );
 
-            const evaluation = JSON.parse(result.text);
+            const evaluation = JSON.parse(resultText);
 
             // 4. Update the database with the reviewed schedule
             db.prepare(`

@@ -60,7 +60,7 @@ function parseSender(fromHeader: string): { name: string, org: string, email: st
 
 export async function runInboxSync(
     db: any,
-    genAI: any,
+    llmClient: any,
     runScribeJob: (taskId: string, instruction: string, payload: any) => Promise<void>
 ) {
     console.log("[Inbox] Starting Gmail sync...");
@@ -144,14 +144,14 @@ Set requires_draft: true for ministerial correspondence, business inquiries,
 and anything referencing Myanmar-India trade, ASEAN, or bilateral matters.
 Set draft_instruction to a one-sentence instruction for The Scribe if requires_draft is true.`;
 
-            const result = await genAI.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: [{ role: "user", parts: [{ text: prompt }] }]
-            });
+            const resultText = await llmClient.generate(
+                "You are The Consul's inbox triage agent for the Myanmar diplomatic mission in India.",
+                prompt
+            );
 
             let classification;
             try {
-                const textResponse = result.text.replace(/^```json/g, "").replace(/```$/g, "").trim();
+                const textResponse = resultText.replace(/^```json/g, "").replace(/```$/g, "").trim();
                 classification = JSON.parse(textResponse);
             } catch (parseErr) {
                 console.error(`[Inbox] Failed to parse Gemini response for msg ${msg.id}. Defaulting to low priority.`);

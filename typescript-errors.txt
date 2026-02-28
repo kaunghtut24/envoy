@@ -1,0 +1,9 @@
+server.ts(632,27): error TS2304: Cannot find name 'genAI'.
+server.ts(638,26): error TS2304: Cannot find name 'genAI'.
+server.ts(644,28): error TS2304: Cannot find name 'genAI'.
+server.ts(650,28): error TS2304: Cannot find name 'genAI'.
+server.ts(656,32): error TS2304: Cannot find name 'genAI'.
+server.ts(728,103): error TS2304: Cannot find name 'genAI'.
+server.ts(733,25): error TS2304: Cannot find name 'genAI'.
+server.ts(735,26): error TS2304: Cannot find name 'genAI'.
+server.ts(737,24): error TS2304: Cannot find name 'genAI'.

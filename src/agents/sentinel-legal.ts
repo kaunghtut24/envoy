@@ -1,6 +1,7 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
 import type { Database } from "better-sqlite3";
+import type { LLMClient } from "../services/llm.ts";
 
 const SENTINEL_LEGAL_SYSTEM_PROMPT = `You are Sentinel-Legal, a regulatory compliance monitor for the Myanmar
 diplomatic mission in India. You analyse economic intelligence items for
@@ -26,7 +27,7 @@ Analyse this item and return only valid JSON:
 If is_regulatory_change is false, return alert_type: "NOT_APPLICABLE" and
 null for all other fields. Return only valid JSON, no markdown.`;
 
-export async function runSentinelLegal(db: Database, genAI: GoogleGenAI) {
+export async function runSentinelLegal(db: Database, llmClient: LLMClient) {
     console.log("[Sentinel-Legal] Starting regulatory scan...");
 
     try {
@@ -62,35 +63,32 @@ Active sectors with Myanmar trade interests in India:
 ${sectorsListStr}`;
 
             try {
-                const result = await genAI.models.generateContent({
-                    model: "gemini-2.5-flash",
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                    config: {
-                        systemInstruction: SENTINEL_LEGAL_SYSTEM_PROMPT,
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: Type.OBJECT,
-                            properties: {
-                                is_regulatory_change: { type: Type.BOOLEAN },
-                                alert_type: { type: Type.STRING },
-                                affected_regulation: { type: Type.STRING, nullable: true },
-                                summary: { type: Type.STRING, nullable: true },
-                                affected_sectors: {
-                                    type: Type.ARRAY,
-                                    items: { type: Type.STRING },
-                                    nullable: true
-                                },
-                                bit_conflict: { type: Type.BOOLEAN, nullable: true },
-                                bit_conflict_note: { type: Type.STRING, nullable: true },
-                                severity: { type: Type.STRING, nullable: true },
-                                recommended_action: { type: Type.STRING, nullable: true }
+                const resultText = await llmClient.generate(
+                    SENTINEL_LEGAL_SYSTEM_PROMPT,
+                    prompt,
+                    "application/json",
+                    {
+                        type: Type.OBJECT,
+                        properties: {
+                            is_regulatory_change: { type: Type.BOOLEAN },
+                            alert_type: { type: Type.STRING },
+                            affected_regulation: { type: Type.STRING, nullable: true },
+                            summary: { type: Type.STRING, nullable: true },
+                            affected_sectors: {
+                                type: Type.ARRAY,
+                                items: { type: Type.STRING },
+                                nullable: true
                             },
-                            required: ["is_regulatory_change", "alert_type"]
-                        }
+                            bit_conflict: { type: Type.BOOLEAN, nullable: true },
+                            bit_conflict_note: { type: Type.STRING, nullable: true },
+                            severity: { type: Type.STRING, nullable: true },
+                            recommended_action: { type: Type.STRING, nullable: true }
+                        },
+                        required: ["is_regulatory_change", "alert_type"]
                     }
-                });
+                );
 
-                const analysis = JSON.parse(result.text);
+                const analysis = JSON.parse(resultText);
 
                 if (analysis.is_regulatory_change && analysis.alert_type !== 'NOT_APPLICABLE') {
                     // Cross-reference logic (TypeScript, no LLM)

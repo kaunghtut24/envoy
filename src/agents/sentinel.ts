@@ -1,7 +1,8 @@
 import Parser from "rss-parser";
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
 import type { Database } from "better-sqlite3";
+import type { LLMClient } from "../services/llm.ts";
 
 const SENTINEL_SYSTEM_PROMPT = `You are The Sentinel, an economic intelligence monitoring agent for the Myanmar Consulate in Kolkata, India.
 Your job is to scan raw news articles and RSS feeds to identity information that could impact Myanmar's trade or political objectives in India.
@@ -18,7 +19,7 @@ Return only valid JSON. No markdown, no explanation.`;
 
 const parser = new Parser();
 
-export async function runSentinel(db: Database, genAI: GoogleGenAI) {
+export async function runSentinel(db: Database, llmClient: LLMClient) {
   console.log("[Sentinel] Starting intelligence gathering...");
 
   try {
@@ -54,28 +55,25 @@ export async function runSentinel(db: Database, genAI: GoogleGenAI) {
           const prompt = `Headline: ${item.title}\nDescription: ${item.contentSnippet || item.content}`;
 
           try {
-            const result = await genAI.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-              config: {
-                systemInstruction: SENTINEL_SYSTEM_PROMPT,
-                responseMimeType: "application/json",
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    tag: { type: Type.STRING },
-                    headline: { type: Type.STRING },
-                    body: { type: Type.STRING },
-                    priority: { type: Type.STRING },
-                    flag: { type: Type.BOOLEAN },
-                    action: { type: Type.STRING, nullable: true }
-                  },
-                  required: ["tag", "headline", "body", "priority", "flag"]
-                }
+            const resultText = await llmClient.generate(
+              SENTINEL_SYSTEM_PROMPT,
+              prompt,
+              "application/json",
+              {
+                type: Type.OBJECT,
+                properties: {
+                  tag: { type: Type.STRING },
+                  headline: { type: Type.STRING },
+                  body: { type: Type.STRING },
+                  priority: { type: Type.STRING },
+                  flag: { type: Type.BOOLEAN },
+                  action: { type: Type.STRING, nullable: true }
+                },
+                required: ["tag", "headline", "body", "priority", "flag"]
               }
-            });
+            );
 
-            const intelligence = JSON.parse(result.text);
+            const intelligence = JSON.parse(resultText);
 
             db.prepare(`
               INSERT INTO intelligence_items (id, tag, source, headline, body, priority, flag, action, published_at)

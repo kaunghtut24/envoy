@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 import Database from "better-sqlite3";
 import { z } from "zod";
-import { GoogleGenAI } from "@google/genai";
+import { createLLMClient } from "./src/services/llm.ts";
 import cron from "node-cron";
 import { formatScribePrompt } from "./src/agents/scribe.ts";
 import { runSentinel } from "./src/agents/sentinel.ts";
@@ -18,14 +18,17 @@ import { runSentinelLegal } from "./src/agents/sentinel-legal.ts";
 import bcrypt from "bcrypt";
 import { authMiddleware, adminOnly, ROLES } from "./src/auth.ts";
 import { processSendQueue } from "./src/services/send-processor.ts";
+import { validateEnv } from "./src/config.ts";
+
+validateEnv();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const db = new Database("envoy.db");
 
-// Gemini Initialization
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+// LLM Initialization
+const llmClient = createLLMClient();
 
 // --- Database Initialization ---
 function initDb() {
@@ -237,6 +240,69 @@ async function startServer() {
     res.json({ token, diplomat: safeDiplomat });
   });
 
+  // Health and Readiness
+  app.get("/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/ready", (req, res) => {
+    let dbStatus: "ok" | "error" = "ok";
+    try {
+      db.prepare("SELECT 1").get();
+    } catch {
+      dbStatus = "error";
+    }
+
+    const getLastRun = (agent: string) => {
+      try {
+        const row = db.prepare("SELECT created_at FROM audit_log WHERE agent = ? ORDER BY created_at DESC LIMIT 1").get(agent) as any;
+        return row ? row.created_at : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const getPendingTasks = () => {
+      try {
+        const row = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status IN ('queued', 'in_progress')").get() as any;
+        return row ? row.count : 0;
+      } catch { return 0; }
+    };
+
+    const getUnmatched = () => {
+      try {
+        // Example proxy for unmatched
+        const totalHome = db.prepare("SELECT COUNT(*) as c FROM entities WHERE type='home'").get() as any;
+        return totalHome ? totalHome.c : 0;
+      } catch { return 0; }
+    };
+
+    const getUnreviewed = () => {
+      try {
+        const row = db.prepare("SELECT COUNT(*) as c FROM intelligence_items WHERE legal_reviewed = 0 AND (tag = 'REGULATORY' OR tag = 'BILATERAL')").get() as any;
+        return row ? row.c : 0;
+      } catch { return 0; }
+    };
+
+    const statusObj = {
+      status: dbStatus === "error" ? "degraded" : "ready",
+      checks: {
+        database: dbStatus,
+        llm_provider: process.env.LLM_PROVIDER || "gemini",
+        agents: {
+          sentinel: { status: "running", last_run: getLastRun("sentinel") },
+          scribe: { status: "running", pending_tasks: getPendingTasks() },
+          connector: { status: "running", unmatched_pairs: getUnmatched() },
+          inbox: { status: "running", last_run: getLastRun("inbox") },
+          attache: { status: "waiting", last_run: getLastRun("attache") },
+          sentinel_legal: { status: "running", unreviewed_items: getUnreviewed() }
+        }
+      }
+    };
+
+    res.status(dbStatus === "error" ? 503 : 200).json(statusObj);
+  });
+
   // Apply Auth Middleware to all subsequent API routes
   app.use("/api", authMiddleware);
 
@@ -343,7 +409,7 @@ async function startServer() {
     );
 
     // Call runConnector asynchronously to not block the request
-    runConnector(db, genAI).catch(err => console.error("[Connector] Auto-run failed:", err));
+    runConnector(db, llmClient).catch(err => console.error("[Connector] Auto-run failed:", err));
 
     res.json({ id });
   });
@@ -472,15 +538,8 @@ async function startServer() {
 
       const systemInstruction = formatScribePrompt(params);
 
-      const result = await genAI.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: instruction }] }],
-        config: {
-          systemInstruction: systemInstruction
-        }
-      });
-
-      const draft = result.text;
+      const resultText = await llmClient.generate(systemInstruction, instruction);
+      const draft = resultText;
 
       db.prepare(`
         UPDATE tasks 
@@ -570,31 +629,31 @@ async function startServer() {
 
   // Sentinel Manual Run
   app.get("/api/agents/sentinel/run", async (req, res) => {
-    await runSentinel(db, genAI);
+    await runSentinel(db, llmClient);
     res.json({ status: "Sentinel run completed" });
   });
 
   // Attaché Manual Run
   app.get("/api/agents/attache/run", async (req, res) => {
-    await runAttache(db, genAI);
+    await runAttache(db, llmClient);
     res.json({ status: "Attaché run completed" });
   });
 
   // Connector Manual Run
   app.get("/api/agents/connector/run", adminOnly, async (req, res) => {
-    await runConnector(db, genAI);
+    await runConnector(db, llmClient);
     res.json({ status: "Connector run completed" });
   });
 
   // Inbox Manual Run
   app.get("/api/agents/inbox/run", adminOnly, async (req, res) => {
-    await runInboxSync(db, genAI, runScribeJob);
+    await runInboxSync(db, llmClient, runScribeJob);
     res.json({ status: "Inbox sync completed" });
   });
 
   // Sentinel-Legal Manual Run
   app.get("/api/agents/sentinel-legal/run", adminOnly, async (req, res) => {
-    await runSentinelLegal(db, genAI);
+    await runSentinelLegal(db, llmClient);
     res.json({ status: "Sentinel-Legal run completed" });
   });
 
@@ -666,16 +725,16 @@ async function startServer() {
 
     if (!command) return res.status(400).json({ error: "Command is required" });
 
-    const routeData = await runConsulRouting(command, req.diplomat?.sub || "default-diplomat-id", db, genAI);
+    const routeData = await runConsulRouting(command, req.diplomat?.sub || "default-diplomat-id", db, llmClient);
 
     // Automatically trigger the relevant agent if applicable
     try {
       if (routeData.agent === "sentinel") {
-        runSentinel(db, genAI);
+        runSentinel(db, llmClient);
       } else if (routeData.agent === "connector") {
-        runConnector(db, genAI);
+        runConnector(db, llmClient);
       } else if (routeData.agent === "attache") {
-        runAttache(db, genAI);
+        runAttache(db, llmClient);
       } else if (routeData.agent === "scribe") {
         // Scribe requires a specific payload format that we don't have from just a quick prompt
         // but for demo purposes, we can queue a generic task if they just ask for it.
@@ -741,16 +800,16 @@ async function startServer() {
     try {
       cron.schedule(sentinelInterval, () => {
         console.log("[Sentinel] Triggering scheduled run...");
-        runSentinel(db, genAI)
-          .then(() => runSentinelLegal(db, genAI).catch(err => console.error("[Sentinel-Legal] Scheduled run failed:", err)))
+        runSentinel(db, llmClient)
+          .then(() => runSentinelLegal(db, llmClient).catch(err => console.error("[Sentinel-Legal] Scheduled run failed:", err)))
           .catch(err => console.error("[Sentinel] Scheduled run failed:", err));
       });
 
       // Initial run with delay to ensure server is up (Wait 5 seconds instead of 10)
       setTimeout(() => {
         console.log("[Sentinel] Triggering initial run...");
-        runSentinel(db, genAI)
-          .then(() => runSentinelLegal(db, genAI).catch(err => console.error("[Sentinel-Legal] Initial run failed:", err)))
+        runSentinel(db, llmClient)
+          .then(() => runSentinelLegal(db, llmClient).catch(err => console.error("[Sentinel-Legal] Initial run failed:", err)))
           .catch(err => console.error("[Sentinel] Initial run failed:", err));
       }, 5000);
     } catch (error) {
@@ -764,13 +823,13 @@ async function startServer() {
     try {
       cron.schedule(inboxInterval, () => {
         console.log("[Inbox] Triggering scheduled sync...");
-        runInboxSync(db, genAI, runScribeJob).catch(err => console.error("[Inbox] Scheduled sync failed:", err));
+        runInboxSync(db, llmClient, runScribeJob).catch(err => console.error("[Inbox] Scheduled sync failed:", err));
       });
 
       // Initial run with delay
       setTimeout(() => {
         console.log("[Inbox] Triggering initial sync...");
-        runInboxSync(db, genAI, runScribeJob).catch(err => console.error("[Inbox] Initial sync failed:", err));
+        runInboxSync(db, llmClient, runScribeJob).catch(err => console.error("[Inbox] Initial sync failed:", err));
       }, 8000);
     } catch (error) {
       console.error("[Inbox] Failed to schedule:", error);

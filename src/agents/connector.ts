@@ -1,6 +1,7 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
 import type { Database } from "better-sqlite3";
+import type { LLMClient } from "../services/llm.ts";
 
 const CONNECTOR_SYSTEM_PROMPT = `You are The Connector, an expert trade matchmaker for the Myanmar Consulate in Kolkata, India.
 
@@ -15,7 +16,7 @@ Return a JSON object with exactly these fields:
 }
 Return only valid JSON. No markdown, no explanation.`;
 
-export async function runConnector(db: Database, genAI: GoogleGenAI) {
+export async function runConnector(db: Database, llmClient: LLMClient) {
     console.log("[Connector] Starting matchmaking analysis...");
 
     try {
@@ -64,24 +65,21 @@ export async function runConnector(db: Database, genAI: GoogleGenAI) {
                 const prompt = JSON.stringify(promptData, null, 2);
 
                 try {
-                    const result = await genAI.models.generateContent({
-                        model: "gemini-2.5-flash",
-                        contents: [{ role: "user", parts: [{ text: prompt }] }],
-                        config: {
-                            systemInstruction: CONNECTOR_SYSTEM_PROMPT,
-                            responseMimeType: "application/json",
-                            responseSchema: {
-                                type: Type.OBJECT,
-                                properties: {
-                                    score: { type: Type.INTEGER },
-                                    rationale: { type: Type.STRING }
-                                },
-                                required: ["score", "rationale"]
-                            }
+                    const resultText = await llmClient.generate(
+                        CONNECTOR_SYSTEM_PROMPT,
+                        prompt,
+                        "application/json",
+                        {
+                            type: Type.OBJECT,
+                            properties: {
+                                score: { type: Type.INTEGER },
+                                rationale: { type: Type.STRING }
+                            },
+                            required: ["score", "rationale"]
                         }
-                    });
+                    );
 
-                    const matchResult = JSON.parse(result.text);
+                    const matchResult = JSON.parse(resultText);
 
                     // Only save good matches (score > 60)
                     if (matchResult.score > 60) {

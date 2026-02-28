@@ -1,5 +1,6 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
+import type { LLMClient } from "../services/llm.ts";
 
 const CONSUL_SYSTEM_PROMPT = `You are The Consul, the master orchestrator for the ENVOY AI system at the Myanmar Consulate in Kolkata, India.
 The user will give you a natural language command. Your job is to determine which of our specialized agents is best suited to handle the request.
@@ -20,27 +21,24 @@ Return a JSON object matching this structure exactly:
 }
 Return only valid JSON. No markdown.`;
 
-export async function runConsulRouting(instruction: string, diplomat_id: string, db: any, genAI: GoogleGenAI) {
+export async function runConsulRouting(instruction: string, diplomat_id: string, db: any, llmClient: LLMClient) {
     try {
-        const result = await genAI.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: [{ role: "user", parts: [{ text: instruction }] }],
-            config: {
-                systemInstruction: CONSUL_SYSTEM_PROMPT,
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                        agent: { type: Type.STRING },
-                        intent: { type: Type.STRING },
-                        response: { type: Type.STRING }
-                    },
-                    required: ["agent", "intent", "response"]
-                }
+        const resultText = await llmClient.generate(
+            CONSUL_SYSTEM_PROMPT,
+            instruction,
+            "application/json",
+            {
+                type: Type.OBJECT,
+                properties: {
+                    agent: { type: Type.STRING },
+                    intent: { type: Type.STRING },
+                    response: { type: Type.STRING }
+                },
+                required: ["agent", "intent", "response"]
             }
-        });
+        );
 
-        const parsed = JSON.parse(result.text);
+        const parsed = JSON.parse(resultText);
 
         // Audit the routing decision
         db.prepare(`

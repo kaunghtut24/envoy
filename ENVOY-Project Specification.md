@@ -112,20 +112,29 @@ PostgreSQL schema, REST API (Fastify + TypeScript), seed data, Docker, audit tra
 | Scheduling | `node-cron` |
 | RSS parsing | `rss-parser` |
 
-### 4.3 AI / LLM
+### 4.3 AI / LLM Abstraction
 | Concern | Configuration |
 |---|---|
-| Primary model | `gemini-2.5-flash` via `@google/genai` SDK |
-| API key env var | `GEMINI_API_KEY` |
+| Strategy | Provider-agnostic `LLMClient` interface (`src/services/llm.ts`) |
+| Cloud (default)| `GeminiClient` wrapping `gemini-2.5-flash` via `@google/genai` |
+| Sovereign | `OllamaClient` wrapping `mistral` via REST API |
 | Batching | Sequential `await` between batches of 5 — never `Promise.all` for LLM calls |
 | Response format | Always instruct model to return only valid JSON, no markdown fencing |
 | Fallback | If LLM call fails, log error and set task `status: "failed"` — never crash the server |
 
-### 4.4 Infrastructure
+### 4.4 Infrastructure & Deployment Modes
+The platform supports two deployment topologies managed via `docker-compose.yml`:
+
+**1. Cloud Mode (Default)**
+Lightweight footprint relying on managed LLM APIs.
+```bash
+docker compose up -d postgres app   # runs Postgres and the Node application
 ```
-docker-compose.yml     — spins up local PostgreSQL
-.env                   — all environment variables (never commit)
-.env.example           — committed template with all keys, no values
+
+**2. Sovereign Mode**
+Air-gapped compatible. Spins up local open-weights LLMs via Ollama alongside the app stack, ensuring no sensitive data leaves the host.
+```bash
+docker compose --profile sovereign up -d
 ```
 
 **Required environment variables:**
@@ -323,9 +332,11 @@ POST /api/entities                        — create entity, triggers matching r
 GET  /api/delegation/:id                  — full delegation with members + schedule
 ```
 
-**Agent Status**
+**Agent Status & Health**
 ```
-GET  /api/agents/status                   — live status of all 6 agents
+GET  /health                      — basic readiness probe (no auth)
+GET  /ready                       — deep dependency & agent readiness probe (no auth)
+GET  /api/agents/status           — live status of all 6 agents
 ```
 
 **Admin / Manual Triggers (no auth yet)**
@@ -669,11 +680,11 @@ When adding new features, match these existing patterns exactly:
 
 **Immediate next steps (Phase 4):**
 1. Implement Firebase/RBAC robust authentication flow (Complete)
-2. Outbound Send Layer: Queue processing and Gmail abstraction (Complete - Step 2)
-3. Sovereign M365 deployment configuration
-4. Self-hosted LLM endpoints configuration
+2. Outbound Send Layer: Queue processing and Gmail abstraction (Complete)
+3. Sovereign deployment setup, LLM abstraction, health probes (Complete - Step 3)
+4. Self-hosted M365 deployment configuration
 
 ---
 
-*ENVOY-PROJECT-SPEC.md · Version 1.5 · Updated after Phase 4 Step 2 (Outbound Send Layer live)*
+*ENVOY-PROJECT-SPEC.md · Version 1.6 · Updated after Phase 4 Step 3 (Sovereign LLM Mode live)*
 *All coding agents: append version note and date when making spec updates.*
