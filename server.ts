@@ -15,6 +15,8 @@ import { runAttache } from "./src/agents/attache.ts";
 import { runConsulRouting } from "./src/agents/consul.ts";
 import { runInboxSync } from "./src/agents/inbox.ts";
 import { runSentinelLegal } from "./src/agents/sentinel-legal.ts";
+import bcrypt from "bcrypt";
+import { authMiddleware, adminOnly, ROLES } from "./src/auth.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +31,8 @@ function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS diplomats (
       id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
       name TEXT NOT NULL,
       mission TEXT NOT NULL,
       role TEXT NOT NULL,
@@ -172,6 +176,16 @@ function initDb() {
       console.warn("Could not add legal_reviewed column:", err.message);
     }
   }
+
+  // Migration for diplomats auth
+  try {
+    db.exec(`ALTER TABLE diplomats ADD COLUMN email TEXT UNIQUE`);
+    db.exec(`ALTER TABLE diplomats ADD COLUMN password_hash TEXT`);
+  } catch (err: any) {
+    if (!err.message.includes("duplicate column name")) {
+      console.warn("Could not add auth columns to diplomats:", err.message);
+    }
+  }
 }
 
 initDb();
@@ -180,6 +194,35 @@ initDb();
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // Public Route
+  app.post("/api/auth/login", async (req, res) => {
+    const schema = z.object({
+      email: z.string().email(),
+      password: z.string()
+    });
+
+    const result = schema.safeParse(req.body);
+    if (!result.success) return res.status(401).json({ error: "Unauthorized" });
+
+    const diplomat = db.prepare("SELECT * FROM diplomats WHERE email = ?").get(result.data.email) as any;
+    if (!diplomat) return res.status(401).json({ error: "Unauthorized" });
+
+    const isMatch = await bcrypt.compare(result.data.password, diplomat.password_hash);
+    if (!isMatch) return res.status(401).json({ error: "Unauthorized" });
+
+    // Generate token
+    const { generateToken } = await import("./src/auth.ts");
+    const token = generateToken(diplomat.id, diplomat.role);
+
+    // Filter password out of response
+    const { password_hash, ...safeDiplomat } = diplomat;
+
+    res.json({ token, diplomat: safeDiplomat });
+  });
+
+  // Apply Auth Middleware to all subsequent API routes
+  app.use("/api", authMiddleware);
 
   // Intelligence
   app.get("/api/intelligence", (req, res) => {
@@ -211,13 +254,13 @@ async function startServer() {
     res.json(items);
   });
 
-  app.post("/api/inbox/:id/approve", (req, res) => {
+  app.post("/api/inbox/:id/approve", adminOnly, (req, res) => {
     const { id } = req.params;
     db.prepare("UPDATE inbox_items SET status = 'approved', read = 1 WHERE id = ?").run(id);
     res.json({ success: true });
   });
 
-  app.post("/api/inbox/:id/decline", (req, res) => {
+  app.post("/api/inbox/:id/decline", adminOnly, (req, res) => {
     const { id } = req.params;
     db.prepare("UPDATE inbox_items SET status = 'declined', read = 1 WHERE id = ?").run(id);
     res.json({ success: true });
@@ -285,7 +328,7 @@ async function startServer() {
     res.json(matches);
   });
 
-  app.post("/api/matches/:id/approve", (req, res) => {
+  app.post("/api/matches/:id/approve", adminOnly, (req, res) => {
     const { id } = req.params;
     db.prepare("UPDATE matches SET status = 'actioned' WHERE id = ?").run(id);
     res.json({ success: true });
@@ -398,7 +441,7 @@ async function startServer() {
     db.prepare(`
       INSERT INTO audit_log (id, agent, action_type, payload, reasoning_trace, diplomat_id)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, agent, action_type, JSON.stringify(payload || {}), reasoning_trace || null, diplomat_id || null);
+    `).run(id, agent, action_type, JSON.stringify(payload || {}), reasoning_trace || null, req.diplomat?.sub || null);
 
     res.json({ id });
   });
@@ -430,19 +473,19 @@ async function startServer() {
   });
 
   // Connector Manual Run
-  app.get("/api/agents/connector/run", async (req, res) => {
+  app.get("/api/agents/connector/run", adminOnly, async (req, res) => {
     await runConnector(db, genAI);
     res.json({ status: "Connector run completed" });
   });
 
   // Inbox Manual Run
-  app.get("/api/agents/inbox/run", async (req, res) => {
+  app.get("/api/agents/inbox/run", adminOnly, async (req, res) => {
     await runInboxSync(db, genAI, runScribeJob);
     res.json({ status: "Inbox sync completed" });
   });
 
   // Sentinel-Legal Manual Run
-  app.get("/api/agents/sentinel-legal/run", async (req, res) => {
+  app.get("/api/agents/sentinel-legal/run", adminOnly, async (req, res) => {
     await runSentinelLegal(db, genAI);
     res.json({ status: "Sentinel-Legal run completed" });
   });
@@ -474,7 +517,7 @@ async function startServer() {
     res.json(alerts);
   });
 
-  app.post("/api/legal-alerts/:id/action", (req, res) => {
+  app.post("/api/legal-alerts/:id/action", adminOnly, (req, res) => {
     const schema = z.object({
       note: z.string().optional()
     });
@@ -493,9 +536,14 @@ async function startServer() {
     // Provide audit log entry
     const auditId = uuidv4();
     db.prepare(`
-      INSERT INTO audit_log (id, agent, action_type, payload, reasoning_trace)
-      VALUES (?, 'legal', 'action_alert', ?, ?)
-    `).run(auditId, JSON.stringify({ alert_id: id, note: result.data.note }), "User manually actioned legal alert.");
+      INSERT INTO audit_log (id, agent, action_type, payload, reasoning_trace, diplomat_id)
+      VALUES (?, 'legal', 'action_alert', ?, ?, ?)
+    `).run(
+      auditId,
+      JSON.stringify({ alert_id: id, note: result.data.note }),
+      "User manually actioned legal alert.",
+      req.diplomat?.sub || null
+    );
 
     res.json({ success: true });
   });
@@ -503,9 +551,14 @@ async function startServer() {
   // Consul Command Routing
   app.post("/api/consul/route", async (req, res) => {
     const { command } = req.body;
+
+    if (!req.diplomat || (req.diplomat.role !== ROLES.DIPLOMAT && req.diplomat.role !== ROLES.STAFF)) {
+      return res.status(403).json({ error: "Forbidden: Only diplomat or staff can use Consul" });
+    }
+
     if (!command) return res.status(400).json({ error: "Command is required" });
 
-    const routeData = await runConsulRouting(command, genAI);
+    const routeData = await runConsulRouting(command, req.diplomat?.sub || "default-diplomat-id", db, genAI);
 
     // Automatically trigger the relevant agent if applicable
     try {

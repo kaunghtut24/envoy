@@ -77,7 +77,9 @@ PostgreSQL schema, REST API (Fastify + TypeScript), seed data, Docker, audit tra
 | The Consul | ✅ Live | Routing LLM, task decomposition |
 | Sentinel-Legal| ✅ Live | Sub-agent, regulatory change detection, entity cross-reference |
 
-### Phase 4 — Sovereign Deployment ⬜ NOT STARTED
+### Phase 4 — Sovereign Deployment & Access Control 🟡 IN PROGRESS
+* JWT-based authentication and role-based access control (RBAC).
+
 ### Phase 5 — Intelligence & Events Engine ⬜ NOT STARTED
 
 ---
@@ -104,6 +106,8 @@ PostgreSQL schema, REST API (Fastify + TypeScript), seed data, Docker, audit tra
 | Database | PostgreSQL (production) / SQLite (preview/dev) |
 | ORM / Query | `pg` or `drizzle-orm` |
 | Validation | `zod` on all request bodies |
+| Authentication | `jsonwebtoken` for stateless auth via HTTP Bearer token |
+| Passwords | `bcrypt` (12 rounds) |
 | Config | `dotenv` — all secrets via env vars |
 | Scheduling | `node-cron` |
 | RSS parsing | `rss-parser` |
@@ -128,6 +132,8 @@ docker-compose.yml     — spins up local PostgreSQL
 ```
 DATABASE_URL=
 GEMINI_API_KEY=
+ENVOY_JWT_SECRET=super_secret_dev_key
+BCRYPT_ROUNDS=12
 SENTINEL_CRON_INTERVAL=*/30 * * * *
 CONNECTOR_CRON_INTERVAL=0 */6 * * *
 PORT=3000
@@ -251,9 +257,20 @@ id UUID PK | name TEXT | feed_url TEXT UNIQUE | priority TEXT
 - Error wrapper: `{ error: { code: string, message: string } }`
 - All UUIDs in path params, never integers
 - Pagination: `?page=1&limit=20` on all list endpoints
-- No auth implemented yet — all endpoints are open (Phase 4 adds RBAC)
+- Authentication Check: Endpoints require `Authorization: Bearer <token>` in headers (Phase 4). Returns generic `401 Unauthorized` on missing or invalid tokens.
+
+### 6.1.1 Roles
+* **diplomat**: Full write access, approves inputs, directs LLM workflows via Consul.
+* **staff**: Standard read-write access to add entities and trigger workflows. Cannot approve tasks.
+* **readonly**: Baseline read access to intelligence feeds and dashboards. No writing or LLM triggering capabilities.
 
 ### 6.2 Endpoints
+
+**Authentication**
+```
+POST /api/auth/login                  — Returns { token, diplomat: { id, name, mission, role } }
+     body: { email, password }
+```
 
 **Intelligence**
 ```

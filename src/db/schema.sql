@@ -10,6 +10,8 @@ CREATE TYPE inbox_status AS ENUM ('pending', 'approved', 'declined');
 -- Tables
 CREATE TABLE diplomats (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
     name TEXT NOT NULL,
     mission TEXT NOT NULL,
     role TEXT NOT NULL,

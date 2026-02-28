@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { v4 as uuidv4 } from "uuid";
 
 const CONSUL_SYSTEM_PROMPT = `You are The Consul, the master orchestrator for the ENVOY AI system at the Myanmar Consulate in Kolkata, India.
 The user will give you a natural language command. Your job is to determine which of our specialized agents is best suited to handle the request.
@@ -19,7 +20,7 @@ Return a JSON object matching this structure exactly:
 }
 Return only valid JSON. No markdown.`;
 
-export async function runConsulRouting(instruction: string, genAI: GoogleGenAI) {
+export async function runConsulRouting(instruction: string, diplomat_id: string, db: any, genAI: GoogleGenAI) {
     try {
         const result = await genAI.models.generateContent({
             model: "gemini-2.5-flash",
@@ -39,7 +40,15 @@ export async function runConsulRouting(instruction: string, genAI: GoogleGenAI) 
             }
         });
 
-        return JSON.parse(result.text);
+        const parsed = JSON.parse(result.text);
+
+        // Audit the routing decision
+        db.prepare(`
+            INSERT INTO audit_log (id, agent, action_type, payload, reasoning_trace, diplomat_id)
+            VALUES (?, 'consul', 'command', ?, ?, ?)
+        `).run(uuidv4(), JSON.stringify({ instruction, routing: parsed }), JSON.stringify(parsed), diplomat_id);
+
+        return parsed;
     } catch (error) {
         console.error("[Consul] Error during routing:", error);
         return {

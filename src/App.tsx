@@ -179,22 +179,76 @@ export default function App() {
     hs_codes: ''
   });
 
+  // Auth state
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('envoy_token'));
+  const [user, setUser] = useState<any>(() => {
+    const saved = localStorage.getItem('envoy_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+
+  // Custom fetch wrapper to inject token and handle 401s
+  const apiFetch = async (url: string, options: RequestInit = {}) => {
+    const headers = new Headers(options.headers || {});
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
+    const response = await fetch(url, { ...options, headers });
+    if (response.status === 401) {
+      setToken(null);
+      setUser(null);
+      localStorage.removeItem('envoy_token');
+      localStorage.removeItem('envoy_user');
+      throw new Error("Unauthorized");
+    }
+    return response;
+  };
+
   useEffect(() => {
+    if (!token) return;
     fetchData();
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [token]);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+
+      if (!res.ok) {
+        setAuthError('Invalid credentials');
+        return;
+      }
+
+      const data = await res.json();
+      setToken(data.token);
+      setUser(data.diplomat);
+      localStorage.setItem('envoy_token', data.token);
+      localStorage.setItem('envoy_user', JSON.stringify(data.diplomat));
+    } catch (err) {
+      setAuthError('Connection error');
+    }
+  };
 
   const fetchData = async () => {
     try {
       const [agentsRes, briefRes, inboxRes, matchesRes, tasksRes, delegationRes, legalRes] = await Promise.all([
-        fetch('/api/agents/status'),
-        fetch('/api/intelligence'),
-        fetch('/api/inbox'),
-        fetch('/api/matches'),
-        fetch('/api/tasks'),
-        fetch('/api/delegation/chamber-2025'),
-        fetch('/api/legal-alerts?actioned=false')
+        apiFetch('/api/agents/status'),
+        apiFetch('/api/intelligence'),
+        apiFetch('/api/inbox'),
+        apiFetch('/api/matches'),
+        apiFetch('/api/tasks'),
+        apiFetch('/api/delegation/chamber-2025'),
+        apiFetch('/api/legal-alerts?actioned=false')
       ]);
 
       const [agentsData, briefData, inboxData, matchesData, tasksData, delegationData, legalData] = await Promise.all([
@@ -241,7 +295,7 @@ export default function App() {
     setChatHistory(prev => [...prev, { role: 'consul', text: 'Processing command...' }]);
 
     try {
-      const res = await fetch('/api/consul/route', {
+      const res = await apiFetch('/api/consul/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: userMsg })
@@ -275,7 +329,7 @@ export default function App() {
       if (type === 'match') endpoint = `/api/matches/${id}/approve`;
 
       if (endpoint) {
-        await fetch(endpoint, { method: 'POST' });
+        await apiFetch(endpoint, { method: 'POST' });
         fetchData(); // Refresh data
       }
 
@@ -288,7 +342,7 @@ export default function App() {
   const commissionTask = async () => {
     if (!scribeInput.trim()) return;
     try {
-      await fetch('/api/tasks', {
+      await apiFetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -314,7 +368,7 @@ export default function App() {
     e.preventDefault();
     if (!newEntity.name || !newEntity.sector) return;
     try {
-      await fetch('/api/entities', {
+      await apiFetch('/api/entities', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -526,13 +580,13 @@ export default function App() {
               <button
                 onClick={async () => {
                   try {
-                    await fetch(`/api/legal-alerts/${legalAlerts[0].id}/action`, {
+                    await apiFetch(`/api/legal-alerts/${legalAlerts[0].id}/action`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ note: "Flagged to delegation brief" })
                     });
 
-                    await fetch('/api/tasks', {
+                    await apiFetch('/api/tasks', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
@@ -609,8 +663,8 @@ export default function App() {
         <button
           onClick={async () => {
             try {
-              await fetch('/api/agents/connector/run');
-              const res = await fetch('/api/matches');
+              await apiFetch('/api/agents/connector/run');
+              const res = await apiFetch('/api/matches');
               const data = await res.json();
               setMatches(data);
             } catch (error) {
@@ -815,7 +869,7 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'database') {
-      fetch('/api/db/diagnostics')
+      apiFetch('/api/db/diagnostics')
         .then(res => res.json())
         .then(data => setDbStats(data))
         .catch(err => console.error("Error fetching DB stats:", err));
@@ -955,8 +1009,8 @@ export default function App() {
               <button
                 onClick={async () => {
                   try {
-                    await fetch('/api/agents/attache/run');
-                    const res = await fetch('/api/delegation/chamber-2025');
+                    await apiFetch('/api/agents/attache/run');
+                    const res = await apiFetch('/api/delegation/chamber-2025');
                     const data = await res.json();
                     setDelegation(data);
                   } catch (error) {
@@ -1003,6 +1057,66 @@ export default function App() {
     </div>
   );
 
+  if (!token) {
+    return (
+      <div className="min-h-screen bg-bg text-text-primary flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-sm border border-border-subtle bg-surface rounded-md overflow-hidden relative shadow-2xl">
+          <div className="absolute top-0 left-0 w-full h-1 bg-gold"></div>
+
+          <div className="p-8 text-center border-b border-border-subtle bg-surface-elevated">
+            <h1 className="text-gold text-3xl font-display tracking-widest mb-2">ENVOY</h1>
+            <p className="font-mono text-[9px] text-text-muted tracking-[0.2em] uppercase">Economic Sentinel System</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="p-8 space-y-6">
+            {authError && (
+              <div className="bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-mono p-3 rounded-sm text-center">
+                {authError}
+              </div>
+            )}
+
+            <div>
+              <label className="block font-mono text-[10px] text-text-muted mb-2 tracking-widest">DIPLOMATIC CREDENTIAL</label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="attache@myanmar-mission.in"
+                className="w-full bg-bg border border-border-subtle rounded-sm p-3 text-sm focus:border-gold outline-none caret-gold"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block font-mono text-[10px] text-text-muted mb-2 tracking-widest">PASSPHRASE</label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="••••••••••••"
+                className="w-full bg-bg border border-border-subtle rounded-sm p-3 text-sm focus:border-gold outline-none caret-gold font-mono tracking-widest"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-gold text-bg py-3 font-mono text-[11px] font-bold tracking-[0.2em] rounded-sm hover:opacity-90 transition-opacity uppercase"
+            >
+              Authenticate
+            </button>
+          </form>
+
+          <div className="p-4 border-t border-border-subtle bg-bg text-center">
+            <p className="font-mono text-[8px] text-text-muted tracking-widest uppercase flex items-center justify-center gap-2">
+              <Shield className="w-3 h-3" /> Secure Access Only
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-bg text-text-primary flex flex-col">
       {/* Top Navigation Bar */}
@@ -1045,12 +1159,21 @@ export default function App() {
 
         <div className="flex items-center gap-4">
           <div className="text-right hidden sm:block">
-            <p className="text-gold font-mono text-xs leading-none">07:15</p>
-            <p className="text-text-muted font-mono text-[8px] tracking-widest uppercase">Monday</p>
+            <p className="text-text-primary text-sm font-display mb-0">{user?.name}</p>
+            <p className="text-gold font-mono text-[8px] tracking-widest uppercase">{user?.mission}</p>
           </div>
-          <div className="w-8 h-8 rounded-full bg-gold-dim border border-gold/30 flex items-center justify-center text-gold font-display text-sm">
-            D
-          </div>
+          <button
+            onClick={() => {
+              setToken(null);
+              setUser(null);
+              localStorage.removeItem('envoy_token');
+              localStorage.removeItem('envoy_user');
+            }}
+            title="Secure Logout"
+            className="w-8 h-8 rounded-full bg-gold-dim border border-gold/30 flex items-center justify-center text-gold font-display text-sm hover:bg-gold hover:text-bg transition-colors cursor-pointer"
+          >
+            {user?.name?.charAt(0) || 'D'}
+          </button>
         </div>
       </header>
 

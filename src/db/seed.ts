@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
+import bcrypt from "bcrypt";
 
 const db = new Database("envoy.db");
 
@@ -8,6 +9,8 @@ function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS diplomats (
       id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
       name TEXT NOT NULL,
       mission TEXT NOT NULL,
       role TEXT NOT NULL,
@@ -111,6 +114,16 @@ function initDb() {
       received_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Migration for diplomats auth
+  try {
+    db.exec(`ALTER TABLE diplomats ADD COLUMN email TEXT UNIQUE`);
+    db.exec(`ALTER TABLE diplomats ADD COLUMN password_hash TEXT`);
+  } catch (err: any) {
+    if (!err.message.includes("duplicate column name")) {
+      console.warn("Could not add auth columns to diplomats:", err.message);
+    }
+  }
 }
 
 async function seed() {
@@ -118,7 +131,13 @@ async function seed() {
   initDb();
 
   // Clear existing data
-  db.prepare("DELETE FROM audit_log").run();
+  db.exec("PRAGMA foreign_keys = OFF;");
+  db.prepare("DROP TABLE IF EXISTS audit_log").run();
+  db.prepare("DROP TABLE IF EXISTS diplomats").run();
+
+  // Re-init so the new table structure with email/password_hash is created fresh
+  initDb();
+
   db.prepare("DELETE FROM relationship_events").run();
   db.prepare("DELETE FROM inbox_items").run();
   db.prepare("DELETE FROM intelligence_items").run();
@@ -126,14 +145,24 @@ async function seed() {
   db.prepare("DELETE FROM entities").run();
   db.prepare("DELETE FROM tasks").run();
   db.prepare("DELETE FROM delegation_events").run();
-  db.prepare("DELETE FROM diplomats").run();
+  db.exec("PRAGMA foreign_keys = ON;");
 
   // Seed Diplomat
   const diplomatId = uuidv4();
+  const passwordHash = await bcrypt.hash("envoy-dev-2025", 12);
+
   db.prepare(`
-    INSERT INTO diplomats (id, name, mission, role, preferences)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(diplomatId, "Aung San", "Myanmar Consulate in Kolkata", "Consul General", JSON.stringify({ theme: "dark" }));
+    INSERT INTO diplomats (id, email, password_hash, name, mission, role, preferences)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    diplomatId,
+    "attache@myanmar-mission.in",
+    passwordHash,
+    "Aung San",
+    "Myanmar Consulate in Kolkata",
+    "diplomat",
+    JSON.stringify({ theme: "dark" })
+  );
 
   // Seed Intelligence
   const intelligence = [
