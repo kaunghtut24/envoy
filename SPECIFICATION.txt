@@ -1,0 +1,2 @@
+Envoy Specification
+See server.ts and src/agents/sentinel.ts for implementation details.

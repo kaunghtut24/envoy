@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: envoy
+      POSTGRES_PASSWORD: envoy_password
+      POSTGRES_DB: envoy_db
+      SENTINEL_CRON_INTERVAL: "*/30 * * * *"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+volumes:
+  postgres_data:
