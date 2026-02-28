@@ -61,7 +61,7 @@ export class OllamaClient implements LLMClient {
 }
 
 export function createLLMClient(): LLMClient {
-    const provider = process.env.LLM_PROVIDER ?? "gemini";
+    const provider = process.env.LLM_PROVIDER || "gemini";
 
     if (provider === "gemini") {
         return new GeminiClient(process.env.GEMINI_API_KEY!);

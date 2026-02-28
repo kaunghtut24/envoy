@@ -8,7 +8,7 @@ export function validateEnv() {
         ollama: ["OLLAMA_BASE_URL", "OLLAMA_MODEL"],
     };
     const missing = required.filter(k => !process.env[k]);
-    const provider = process.env.LLM_PROVIDER ?? "gemini";
+    const provider = process.env.LLM_PROVIDER || "gemini";
     const missingConditional = (conditional[provider] ?? []).filter(k => !process.env[k]);
 
     if (missing.length || missingConditional.length) {
